@@ -2,20 +2,18 @@ package l2met
 
 import (
 	"bytes"
-	"fmt"
-	"log"
-	"log/syslog"
-	"net/http"
-	"os"
-	"text/template"
-	"time"
-
+	"errors"
 	"io"
 	"io/ioutil"
+	"log"
+	"log/syslog"
 	"net"
-	"net/url"
+	"net/http"
+	"os"
 	"regexp"
-	"sort"
+	"strconv"
+	"text/template"
+	"time"
 
 	"github.com/gliderlabs/logspout/router"
 )
@@ -44,17 +42,14 @@ func NewL2metAdapter(route *router.Route) (router.LogAdapter, error) {
 
 	client := &http.Client{Transport: transport}
 
-	// Create the url
-	query := ""
-	if len(query) > 0 {
-		queryString := buildQueryString(route.Options)
-		query = fmt.Sprintf("?%s", queryString)
+	// Get the url
+	url := os.Getenv("L2MET_URL")
+	if url == "" {
+		return nil, errors.New("l2met url not found")
 	}
 
-	url := fmt.Sprintf("https://%s%s", route.Address, query)
-
 	// Create the syslog RFC5424 template
-	tmplStr := "<{{.Priority}}>1 {{.Timestamp}} {{.Container.Config.Hostname}} {{.ContainerName}} {{.Container.State.Pid}} - [] {{.Data}}\n"
+	tmplStr := "<{{.Priority}}>1 {{.Timestamp}} {{.Container.Config.Hostname}} {{.ContainerName}} {{.Container.State.Pid}} - - {{.Data}}\n"
 	tmpl, err := template.New("l2met").Parse(tmplStr)
 	if err != nil {
 		return nil, err
@@ -89,14 +84,20 @@ func (a *L2metAdapter) Stream(logStream chan *router.Message) {
 			log.Println("l2met:", err)
 		}
 
-		response, err := a.client.Do(request)
-		if err != nil {
-			log.Println("l2met:", err)
-		}
+		go func(request *http.Request) {
+			response, err := a.client.Do(request)
+			if err != nil {
+				log.Println("l2met:", err)
+			}
 
-		// Discard the response body so we can reuse the connection.
-		io.Copy(ioutil.Discard, response.Body)
-		response.Body.Close()
+			if response.StatusCode != 200 {
+				log.Println("l2met: Error sending log ", response.StatusCode)
+			}
+
+			// Discard the response body so we can reuse the connection.
+			io.Copy(ioutil.Discard, response.Body)
+			response.Body.Close()
+		}(request)
 	}
 }
 
@@ -111,7 +112,11 @@ func (m *SyslogMessage) Render(tmpl *template.Template) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+
+	// We need to length prefix this
+	length := strconv.Itoa(buf.Len())
+
+	return bytes.Join([][]byte{[]byte(length), buf.Bytes()}, []byte(" ")), nil
 }
 
 func (m *SyslogMessage) Priority() syslog.Priority {
@@ -135,32 +140,6 @@ func (m *SyslogMessage) Timestamp() string {
 
 func (m *SyslogMessage) ContainerName() string {
 	return m.Message.Container.Name[1:]
-}
-
-func buildQueryString(v map[string]string) string {
-	var buf bytes.Buffer
-
-	keys := make([]string, 0, len(v))
-
-	for k := range v {
-		keys = append(keys, k)
-	}
-
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		vs := v[k]
-		prefix := url.QueryEscape(k) + "="
-
-		if buf.Len() > 0 {
-			buf.WriteByte('&')
-		}
-
-		buf.WriteString(prefix)
-		buf.WriteString(url.QueryEscape(vs))
-	}
-
-	return buf.String()
 }
 
 func dial(netw, addr string) (net.Conn, error) {
