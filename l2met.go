@@ -10,12 +10,14 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/gliderlabs/logspout/router"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
+
+	"github.com/gliderlabs/logspout/router"
 )
 
 var hostname string
@@ -28,7 +30,7 @@ func init() {
 
 // L2metAdapter is an adapter that streams HTTPS RFC5424 to l2met.
 type L2metAdapter struct {
-	client http.Client
+	client *http.Client
 	url    string
 	route  *router.Route
 	tmpl   *template.Template
@@ -45,8 +47,8 @@ func NewL2metAdapter(route *router.Route) (router.LogAdapter, error) {
 	// Create the url
 	query := ""
 	if len(query) > 0 {
-		queryParams := route.Options.(url.Values);
-		query = fmt.Sprintf("?%s", queryParams.Encode())
+		queryString := buildQueryString(route.Options)
+		query = fmt.Sprintf("?%s", queryString)
 	}
 
 	url := fmt.Sprintf("https://%s%s", route.Address, query)
@@ -87,12 +89,10 @@ func (a *L2metAdapter) Stream(logStream chan *router.Message) {
 			log.Println("l2met:", err)
 		}
 
-
 		response, err := a.client.Do(request)
 		if err != nil {
 			log.Println("l2met:", err)
 		}
-
 
 		// Discard the response body so we can reuse the connection.
 		io.Copy(ioutil.Discard, response.Body)
@@ -135,6 +135,32 @@ func (m *SyslogMessage) Timestamp() string {
 
 func (m *SyslogMessage) ContainerName() string {
 	return m.Message.Container.Name[1:]
+}
+
+func buildQueryString(v map[string]string) string {
+	var buf bytes.Buffer
+
+	keys := make([]string, 0, len(v))
+
+	for k := range v {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		vs := v[k]
+		prefix := url.QueryEscape(k) + "="
+
+		if buf.Len() > 0 {
+			buf.WriteByte('&')
+		}
+
+		buf.WriteString(prefix)
+		buf.WriteString(url.QueryEscape(vs))
+	}
+
+	return buf.String()
 }
 
 func dial(netw, addr string) (net.Conn, error) {
